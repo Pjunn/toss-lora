@@ -105,97 +105,10 @@ class TOSS(LatentDiffusion):
         diffusion_model = self.model.diffusion_model
         cond_txt = torch.cat(cond['c_crossattn'], 1)
 
-        print("X_noisy shape:", x_noisy.shape)
-        print("cond['in_concat'] shape:", cond['in_concat'][0].shape)
-        cat_x = torch.cat([x_noisy] + cond['in_concat'], dim=0)
-        print("cat_x shape:", cat_x.shape)
-
-        # eps = diffusion_model(
-        #     x=x_noisy,
-        #     timesteps=t,
-        #     context=cond_txt,
-        #     delta_pose=cond['delta_pose']
-        # )
-
-
         eps = diffusion_model(x=torch.cat([x_noisy] + cond['in_concat'], dim=0), \
                 timesteps=t, context=cond_txt, delta_pose=cond['delta_pose'])
 
         return eps
-
-    # def apply_model(self, x_noisy, t, cond:Dict, *args, **kwargs):
-    #     assert isinstance(cond, dict)
-    #     diffusion_model = self.model.diffusion_model
-        
-    #     # 1. Get the Current Batch Size (e.g., 4)
-    #     B = x_noisy.shape[0]
-        
-    #     # 2. Get the Hint Latents
-    #     # Ensure they match the batch size of the noise
-    #     in_concat = cond['in_concat'][0]
-    #     if in_concat.shape[0] != B:
-    #         in_concat = in_concat[:B]
-
-    #     # 3. CHANNEL CONCATENATION (The 8-Channel Fix)
-    #     # Resulting shape: [B, 8, 32, 32]
-    #     x_input = torch.cat([x_noisy, in_concat], dim=1)
-        
-    #     # 4. Standard Text Conditioning (Single Batch B)
-    #     cond_txt = torch.cat(cond['c_crossattn'], 1)
-    #     if cond_txt.shape[0] != B:
-    #         cond_txt = cond_txt[:B]
-            
-    #     # 5. Standard Pose Conditioning (Single Batch B)
-    #     delta_pose = cond['delta_pose']
-    #     if delta_pose.shape[0] != B:
-    #         delta_pose = delta_pose[:B]
-            
-    #     # 6. Run the UNet with a perfectly aligned single batch of size B
-    #     eps = diffusion_model(
-    #         x=x_input, 
-    #         timesteps=t, 
-    #         context=cond_txt, 
-    #         delta_pose=delta_pose
-    #     )
-    #     return eps
-
-    # def apply_model(self, x_noisy, t, cond, *args, **kwargs):
-    #     assert isinstance(cond, dict)
-    #     diffusion_model = self.model.diffusion_model
-
-    #     # DDIM may call us with B=1 (no CFG) or B=2 (CFG)
-    #     B = x_noisy.shape[0]
-
-    #     def match_B(x):
-    #         if not torch.is_tensor(x):
-    #             return x
-    #         if x.shape[0] == B:
-    #             return x
-    #         if x.shape[0] == 1:
-    #             reps = [B] + [1] * (x.dim() - 1)
-    #             return x.repeat(*reps)
-    #         return x[:B]
-
-    #     # ---- make all cond pieces batch=B first ----
-    #     cond_txt = cond["c_crossattn"][0]         # [B, 77, 768] typically
-    #     cond_txt = match_B(cond_txt)
-
-    #     delta_pose = match_B(cond["delta_pose"])  # [B, ...]
-    #     in_concat  = match_B(cond["in_concat"][0])# [B, 4, 32, 32]
-
-    #     # ---- build the paired batch (2B) ----
-    #     x_in = torch.cat([x_noisy, in_concat], dim=0)   # [2B, 4, 32, 32]
-    #     t_in = torch.cat([t, t], dim=0)                 # [2B]
-    #     ctx  = torch.cat([cond_txt, cond_txt], dim=0)   # [2B, 77, 768]
-    #     pose = torch.cat([delta_pose, delta_pose], dim=0)
-
-    #     eps = diffusion_model(
-    #         x=x_in,
-    #         timesteps=t_in,
-    #         context=ctx,
-    #         delta_pose=pose,
-    #     )
-    #     return eps
 
 
     def get_learned_conditioning(self, c):

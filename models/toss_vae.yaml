@@ -5,15 +5,12 @@ model:
     lora_config_params:
         r: 16
         lora_alpha: 16
-        
-        # Use regex pattern to match attention projection layers
-        # target_modules: []
-        # target_modules: ["attn2.to_q", "attn2.to_k", "attn2.to_v"]
-        lora_dropout: 0.0  # Disable dropout for debugging
 
-        # Target SELF-ATTENTION (attn1) layers - these don't depend on text!
-        # attn2 (cross-attention) won't learn anything with empty text prompts
         target_modules: [
+            # Middle block
+            "middle_block.1.transformer_blocks.0.attn1.to_q",
+            "middle_block.1.transformer_blocks.0.attn1.to_k",
+            "middle_block.1.transformer_blocks.0.attn1.to_v",
             # High-resolution output blocks - important for facial details
             "output_blocks.9.1.transformer_blocks.0.attn1.to_q",
             "output_blocks.9.1.transformer_blocks.0.attn1.to_k",
@@ -24,13 +21,11 @@ model:
             "output_blocks.11.1.transformer_blocks.0.attn1.to_q",
             "output_blocks.11.1.transformer_blocks.0.attn1.to_k",
             "output_blocks.11.1.transformer_blocks.0.attn1.to_v",
-            # Middle block
-            "middle_block.1.transformer_blocks.0.attn1.to_q",
-            "middle_block.1.transformer_blocks.0.attn1.to_k",
-            "middle_block.1.transformer_blocks.0.attn1.to_v"
         ]
-        # lora_dropout: 0.05
+
+        lora_dropout: 0.05
         bias: "none"
+
     linear_start: 0.00085
     linear_end: 0.0120
     num_timesteps_cond: 1
@@ -53,10 +48,9 @@ model:
     finetune: True
     ucg_img: 0.05
 
-    # Geometry losses (frozen DPT-Hybrid normal estimator)
+    # Geometry loss (frozen DPT-Hybrid normal estimator)
     normal_estimator_path: "hf:clay3d/omnidata"
     geometry_loss_weight: 0.1
-    geometry_perceptual_loss_weight: 0.1
 
     scheduler_config: # 10000 warmup steps
       target: ldm.lr_scheduler.LambdaLinearScheduler

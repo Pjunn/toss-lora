@@ -165,3 +165,4 @@ checkpoints/
 exp/
 datasets/
 copy/
+wandb/

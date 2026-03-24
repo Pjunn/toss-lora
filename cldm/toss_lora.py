@@ -4,9 +4,19 @@ from peft import get_peft_model, LoraConfig
 import torch.nn.functional as F
 from torch import nn
 import wandb
+import lpips
+
+# CRITICAL FIX: Completely disable gradient checkpointing to fix LoRA gradient flow
+# The custom CheckpointFunction doesn't properly handle PEFT's dynamically added parameters
+import ldm.modules.diffusionmodules.util as ldm_util
+_original_checkpoint = ldm_util.checkpoint
+def _no_checkpoint(func, inputs, params, flag):
+    """Always bypass checkpointing - just run the function directly"""
+    return func(*inputs)
+ldm_util.checkpoint = _no_checkpoint
+print("[PATCH] Disabled gradient checkpointing in ldm_util.checkpoint")
 
 run = None
-
 
 def _cosine_similarity_loss(pred_normals, gt_normals, mask, eps=1e-8):
     """Masked cosine similarity loss. pred, gt: [B,3,H,W] L2-normalized. mask: [B,1,H,W]."""
@@ -17,25 +27,11 @@ def _cosine_similarity_loss(pred_normals, gt_normals, mask, eps=1e-8):
         return loss.sum() / (mask.sum() + eps)
     return loss.mean()
 
-
-def _geometry_perceptual_loss(pred_features, gt_features, mask=None, eps=1e-8):
-    """L2 loss between geometry features. pred_features, gt_features: [B,C,H,W]. mask: [B,1,H,W] optional."""
-    if pred_features.shape != gt_features.shape:
-        gt_features = F.interpolate(gt_features, size=pred_features.shape[2:], mode="bilinear", align_corners=False)
-    if mask is not None:
-        mask = F.interpolate(mask.float(), size=pred_features.shape[2:], mode="area")
-        diff = (pred_features - gt_features) ** 2
-        diff = diff.mean(dim=1, keepdim=True) * mask
-        return diff.sum() / (mask.sum() + eps)
-    return F.mse_loss(pred_features, gt_features)
-
-
 class TossLoraModule(TOSS):
-    def __init__(self, lora_config_params, *args, normal_estimator_path="hf:clay3d/omnidata", geometry_loss_weight=0.1, geometry_perceptual_loss_weight=0.1, **kwargs):
+    def __init__(self, lora_config_params, *args, normal_estimator_path="hf:clay3d/omnidata", geometry_loss_weight=0.1, **kwargs):
         kwargs.pop("lora_config_params", None)  # consumed by us
         self.normal_estimator_path = kwargs.pop("normal_estimator_path", normal_estimator_path)
         self.geometry_loss_weight = kwargs.pop("geometry_loss_weight", geometry_loss_weight)
-        self.geometry_perceptual_loss_weight = kwargs.pop("geometry_perceptual_loss_weight", geometry_perceptual_loss_weight)
         super().__init__(*args, **kwargs)
         self._normal_estimator = None
 
@@ -55,11 +51,6 @@ class TossLoraModule(TOSS):
             },
         )
 
-        # internal_unet = self.model.diffusion_model
-
-        # # Turn off checkpointing manually
-        # internal_unet.use_checkpoint = False
-
         # Change pose_net in_feature channel from 51 to 16
         # self.model.diffusion_model.pose_net = nn.Sequential(
         #     nn.Linear(16, 320), # 51 -> 16
@@ -67,12 +58,12 @@ class TossLoraModule(TOSS):
         #     nn.Linear(320, 320)
         # )
 
+        # Disable checkpoints
         unet = self.model.diffusion_model
         def disable_all_ckpt(m):
             for attr in ["use_checkpoint", "checkpoint", "use_checkpointing"]:
                 if hasattr(m, attr):
                     setattr(m, attr, False)
-
         unet.apply(disable_all_ckpt)
 
         # 1. Freeze the base model
@@ -82,8 +73,19 @@ class TossLoraModule(TOSS):
         peft_config = LoraConfig(**lora_config_params)
         self.model.diffusion_model = get_peft_model(self.model.diffusion_model, peft_config)
 
-        # 2b. Unfreeze pose_net for human face adaptation
-        # The pose_net was trained on objects - human head poses have different distributions
+        # CRITICAL: Disable checkpointing AGAIN after PEFT wrapping
+        # PEFT changes module hierarchy, must ensure checkpointing is disabled
+        self.model.diffusion_model.apply(disable_all_ckpt)
+        
+        # Verify checkpointing is disabled
+        ckpt_enabled_count = 0
+        for name, module in self.model.diffusion_model.named_modules():
+            if hasattr(module, 'checkpoint') and module.checkpoint:
+                ckpt_enabled_count += 1
+                print(f"[WARNING] Checkpointing still enabled on: {name}")
+        print(f"[INIT] Modules with checkpointing enabled: {ckpt_enabled_count}")
+
+        # 3. Unfreeze PoseNet params
         pose_net_count = 0
         for n, p in self.model.diffusion_model.named_parameters():
             if "pose_net" in n:
@@ -92,7 +94,7 @@ class TossLoraModule(TOSS):
                 print(f"[INIT] Unfreezing pose_net param: {n}, shape={p.shape}")
         print(f"[INIT] Unfroze {pose_net_count} pose_net parameters")
         
-        # 3. Explicitly enable gradients for LoRA parameters (in case PEFT didn't)
+        # 4. Explicitly enable gradients for LoRA parameters (in case PEFT didn't)
         lora_count = 0
         lora_params_info = []
         for n, p in self.model.diffusion_model.named_parameters():
@@ -101,13 +103,15 @@ class TossLoraModule(TOSS):
                 lora_count += 1
                 lora_params_info.append((n, p.shape, p.requires_grad))
 
-                # CRITICAL FIX: Initialize lora_B with small non-zero values
-                # This prevents gradient attribution issues when lora_B is all zeros
-                if "lora_B" in n and p.abs().sum() == 0:
-                    print(f"[INIT] Fixing zero-initialized lora_B: {n}")
+                # Initialize lora_B with small but meaningful values
+                # This is essential for gradient flow - with lora_B=0, lora_A gets no gradients
+                if "lora_B" in n:
+                    print(f"[INIT] lora_B before init: {n}, mean={p.abs().mean().item():.6e}")
                     with torch.no_grad():
-                        # Use larger initialization for better gradient flow
-                        p.normal_(mean=0.0, std=1e-3)
+                        # Use kaiming uniform like lora_A for balanced gradients
+                        nn.init.kaiming_uniform_(p, a=5**0.5)  # Same as lora_A default
+                        p.mul_(0.01)  # Scale down to not disrupt pretrained model too much
+                    print(f"[INIT] lora_B after init: {n}, mean={p.abs().mean().item():.6e}")
                         
             # Also enable output layers if needed
             if "base_model.model.out." in n:
@@ -130,6 +134,65 @@ class TossLoraModule(TOSS):
         
         # Debug: Check pose_net weights
         self._debug_pose_net_weights()
+
+
+        # Initialize perceptual loss (LPIPS)
+        self.lpips_loss = lpips.LPIPS(net='vgg').eval()
+        self.lpips_loss.requires_grad_(False)  # Freeze LPIPS network
+        print("[INIT] Initialized LPIPS perceptual loss (VGG backbone)")
+        
+        # Loss weights for hybrid loss
+        self.perceptual_weight = 1.0  # Weight for perceptual loss
+        self.mse_weight = 0.1  # Small MSE component for stability
+        self.mask_min_weight = 0.2  # Soft mask: background contributes 20%, face contributes 100%
+
+        # Debug: Check LoRA layer scaling and adapter status
+        self._debug_lora_setup()
+        self._debug_pose_net_weights()
+
+    def _debug_pose_net_weights(self):
+        """Debug helper to inspect pose_net weights"""
+        print("\n[DEBUG] Pose Net Weight Analysis:")
+        
+        # Access pose_net (may be wrapped by PEFT)
+        unet = self.model.diffusion_model
+        pose_net = None
+        
+        # Try to find pose_net in the model
+        if hasattr(unet, 'base_model'):
+            # PEFT wrapped model
+            if hasattr(unet.base_model, 'model') and hasattr(unet.base_model.model, 'pose_net'):
+                pose_net = unet.base_model.model.pose_net
+        elif hasattr(unet, 'pose_net'):
+            pose_net = unet.pose_net
+        
+        if pose_net is None:
+            print("  [WARNING] pose_net not found!")
+            return
+        
+        print(f"  pose_net structure: {pose_net}")
+        print(f"  pose_enc type: {getattr(unet.base_model.model if hasattr(unet, 'base_model') else unet, 'pose_enc', 'unknown')}")
+        
+        # Iterate through pose_net layers
+        for name, param in pose_net.named_parameters():
+            print(f"\n  Layer: pose_net.{name}")
+            print(f"    shape: {param.shape}")
+            print(f"    requires_grad: {param.requires_grad}")
+            print(f"    mean: {param.data.mean().item():.6f}")
+            print(f"    std: {param.data.std().item():.6f}")
+            print(f"    min: {param.data.min().item():.6f}")
+            print(f"    max: {param.data.max().item():.6f}")
+            print(f"    abs_mean: {param.data.abs().mean().item():.6f}")
+            
+            # Check if weights look initialized (not all zeros)
+            if param.data.abs().sum() == 0:
+                print(f"    [WARNING] All zeros - may not be loaded properly!")
+            
+        # Print input/output dimensions
+        if hasattr(pose_net, '0') and hasattr(pose_net[0], 'in_features'):
+            print(f"\n  Input features (pose_net[0].in_features): {pose_net[0].in_features}")
+        if hasattr(pose_net, '2') and hasattr(pose_net[2], 'out_features'):
+            print(f"  Output features (pose_net[2].out_features): {pose_net[2].out_features}")
 
     @property
     def normal_estimator(self):
@@ -286,12 +349,45 @@ class TossLoraModule(TOSS):
                 # Training config from kwargs if available
                 "image_size": self.image_size,
                 "timesteps": self.num_timesteps,
+                # Loss config
+                "loss_type": "perceptual + mse",
+                "perceptual_weight": self.perceptual_weight,
+                "mse_weight": self.mse_weight,
+                "mask_min_weight": self.mask_min_weight,
+                "lpips_backbone": "vgg",
             }, allow_val_change=True)
 
     def training_step(self, batch, batch_idx):
-        # use of delta pose
-        # masking
-        # masked loss
+
+        # Ensure model is in training mode
+        self.model.diffusion_model.train()
+        
+        # CRITICAL: Explicitly enable LoRA adapters for PEFT
+        if hasattr(self.model.diffusion_model, 'enable_adapters'):
+            self.model.diffusion_model.enable_adapters()
+        
+        # Debug: verify LoRA is active on first step
+        if batch_idx == 0 and self.global_step == 0:
+            print(f"[TRAIN] Training step 0, verifying LoRA setup...")
+            lora_active = 0
+            for n, m in self.model.diffusion_model.named_modules():
+                if 'lora' in n.lower():
+                    lora_active += 1
+            print(f"[TRAIN] Found {lora_active} LoRA modules in forward path")
+            
+            # CRITICAL: Verify LoRA weights are non-zero
+            for n, p in self.model.diffusion_model.named_parameters():
+                if "lora" in n.lower():
+                    print(f"[TRAIN] {n}: mean={p.abs().mean().item():.6e}, requires_grad={p.requires_grad}")
+            
+            # Check adapter state
+            if hasattr(self.model.diffusion_model, 'active_adapters'):
+                print(f"[TRAIN] Active adapters: {self.model.diffusion_model.active_adapters}")
+            if hasattr(self.model.diffusion_model, 'disable_adapters'):
+                print(f"[TRAIN] disable_adapters attr: {getattr(self.model.diffusion_model, 'disable_adapters', 'N/A')}")
+
+            # Register a hook to check LoRA layer output
+            self._register_lora_debug_hook()
 
         # Ensure model is in training mode
         self.model.diffusion_model.train()
@@ -321,133 +417,196 @@ class TossLoraModule(TOSS):
 
         x_noisy = self.q_sample(x_start=x, t=t, noise=noise)
 
-        # Note: x_noisy doesn't need requires_grad - we only need gradients for model params
+        '''Forward'''
         model_output = self.apply_model(x_noisy, t, cond)
 
         target = noise
 
-        # MSE
-        loss = (model_output - target) ** 2
+        '''MSE Loss'''
+        # loss = (model_output - target) ** 2
+        # print("LOSS shape 1:", loss.shape)
+        # loss = F.mse_loss(model_output, target, reduction="mean")
+        # print("LOSS shape 2:", loss.shape)
+        # # if torch.rand(1) < 0.1:
+        # #     cond['in_concat'][0] = torch.zeros_like(cond['in_concat'][0])
+        # # loss, loss_dict = self.forward(x, cond)
 
-        # if torch.rand(1) < 0.1:
-        #     cond['in_concat'][0] = torch.zeros_like(cond['in_concat'][0])
+        '''Perceptual Loss Computation'''
+        # Predict x0 from the noise prediction using the diffusion formula:
+        # x_t = sqrt(alpha_bar_t) * x_0 + sqrt(1 - alpha_bar_t) * noise
+        # => x_0 = (x_t - sqrt(1 - alpha_bar_t) * predicted_noise) / sqrt(alpha_bar_t)
+        sqrt_alphas_cumprod = self.sqrt_alphas_cumprod[t][:, None, None, None]
+        sqrt_one_minus_alphas_cumprod = self.sqrt_one_minus_alphas_cumprod[t][:, None, None, None]
+        
+        # Predict x0 from model's noise prediction
+        pred_x0 = (x_noisy - sqrt_one_minus_alphas_cumprod * model_output) / sqrt_alphas_cumprod
+        # Ground truth x0
+        gt_x0 = x  # The clean latent we started with
+        
+        # Decode to image space for perceptual loss
+        # Use torch.no_grad for decoder to save memory (only need gradients through encoder path)
+        pred_img = self.decode_first_stage(pred_x0)  # [-1, 1] range
+        gt_img = self.decode_first_stage(gt_x0)  # [-1, 1] range
+        
+        # Compute perceptual loss (LPIPS expects [-1, 1] range)
+        # Move LPIPS to same device as images
+        self.lpips_loss = self.lpips_loss.to(pred_img.device)
+        perceptual_loss = self.lpips_loss(pred_img, gt_img).mean()
 
-        # loss, loss_dict = self.forward(x, cond)
+        # Optional: small MSE component on noise for training stability
+        mse_loss = F.mse_loss(model_output, target, reduction="mean")
+
+        '''Combine Loss'''
+        loss = self.perceptual_weight * perceptual_loss + self.mse_weight * mse_loss
+        print(f"LOSS: perceptual={perceptual_loss.item():.4f}, mse={mse_loss.item():.4f}, total={loss.item():.4f}")
 
 
-        mask = batch.get("mask") # Original mask [B, 1, 256, 256]
-        # Latent mask
+        mask = batch.get("mask") # Original mask [B, 1, 256, 256]        
+
+        '''Latent mask (MSE)'''
+        # if mask is not None:
+        #     # latent_mask = F.interpolate(mask, size=loss.shape[-2:], mode="area")
+        #     soft_mask = mask * (1.0 - self.mask_min_weight) + self.mask_min_weight  # Range: [min_weight, 1.0]
+        #     latent_mask = F.interpolate(soft_mask, size=model_output.shape[-2:], mode="area")
+            
+        #     # loss = loss * latent_mask
+        #     # loss = loss.sum() / (latent_mask.sum() + 1e-8)
+        #     loss = (F.mse_loss(model_output, noise, reduction="none") * latent_mask).sum() / (latent_mask.sum() + 1e-8)
+        # else:
+        #     loss = loss.mean()
+
+        '''Latent mask (Perceptual)'''
         if mask is not None:
-            latent_mask = F.interpolate(mask, size=loss.shape[-2:], mode="area")
+            # ===== Soft Mask =====
+            # Convert binary mask to soft mask so non-masked regions still contribute
+            # mask=1 (face) -> weight=1.0, mask=0 (background) -> weight=min_weight
+            soft_mask = mask * (1.0 - self.mask_min_weight) + self.mask_min_weight  # Range: [min_weight, 1.0]
             
-            loss = loss * latent_mask
+            # For perceptual loss with mask, we need to apply mask in image space
+            img_mask = F.interpolate(soft_mask, size=pred_img.shape[-2:], mode="bilinear", align_corners=False)
             
-            loss = loss.sum() / (latent_mask.sum() + 1e-8)
-        else:
-            loss = loss.mean()
+            # Masked perceptual loss: compute per-pixel LPIPS isn't straightforward,
+            # so we use a masked MSE on decoded images as an approximation
+            masked_img_loss = (F.mse_loss(pred_img, gt_img, reduction="none") * img_mask).mean()
+            
+            # Also apply mask to latent MSE
+            latent_mask = F.interpolate(soft_mask, size=model_output.shape[-2:], mode="area")
+            masked_mse_loss = (F.mse_loss(model_output, noise, reduction="none") * latent_mask).mean()
+            
+            # Combine masked losses
+            loss = self.perceptual_weight * masked_img_loss + self.mse_weight * masked_mse_loss
+            print(f"MASKED LOSS: img={masked_img_loss.item():.4f}, mse={masked_mse_loss.item():.4f}")
 
-        # Geometry losses (frozen DPT-Hybrid proxy)
-        if (self.geometry_loss_weight > 0 or self.geometry_perceptual_loss_weight > 0) and "normal" in batch and "normal_mask" in batch:
+        ''' Geometry loss (frozen DPT-Hybrid proxy) '''
+        if self.geometry_loss_weight > 0 and "normal" in batch and "normal_mask" in batch:
             x0_pred = x - model_output
             pred_imgs = self.decode_first_stage(x0_pred)
             pred_imgs = torch.clamp((pred_imgs + 1) / 2, 0, 1)
             if pred_imgs.ndim == 4 and pred_imgs.shape[-1] == 3:
                 pred_imgs = pred_imgs.permute(0, 3, 1, 2)
-            gt_imgs = batch[self.first_stage_key].to(self.device)
-            if gt_imgs.ndim == 4 and gt_imgs.shape[-1] == 3:
-                gt_imgs = gt_imgs.permute(0, 3, 1, 2)
-            gt_imgs = torch.clamp(gt_imgs, 0, 1)
+            pred_normals = self.normal_estimator(pred_imgs)
+            gt_normals = batch["normal"].to(self.device)
             normal_mask = batch["normal_mask"].to(self.device)
+            geom_loss = _cosine_similarity_loss(pred_normals, gt_normals, normal_mask)
+            loss = loss + self.geometry_loss_weight * geom_loss
 
-            if self.geometry_loss_weight > 0:
-                pred_normals = self.normal_estimator(pred_imgs)
-                gt_normals = batch["normal"].to(self.device)
-                geom_loss = _cosine_similarity_loss(pred_normals, gt_normals, normal_mask)
-                loss = loss + self.geometry_loss_weight * geom_loss
-                if run is not None:
-                    run.log({"geometry_loss": geom_loss})
+        run.log({
+            "loss": loss,
+            "perceptual_loss": perceptual_loss,
+            "mse_loss": mse_loss,
+            "geometry_loss": geom_loss
+        })
+        print(f"LOSS logged: total={loss.item():.4f}")
 
-            if self.geometry_perceptual_loss_weight > 0:
-                pred_feats = self.normal_estimator.forward_features(pred_imgs)
-                gt_feats = self.normal_estimator.forward_features(gt_imgs)
-                geom_perc_loss = _geometry_perceptual_loss(pred_feats, gt_feats, normal_mask)
-                loss = loss + self.geometry_perceptual_loss_weight * geom_perc_loss
-                if run is not None:
-                    run.log({"geometry_perceptual_loss": geom_perc_loss})
-
-        run.log({"loss": loss})
-        print("LOSS_SHAPE:", loss.shape)
-
+        '''WanDB logging'''
         if batch_idx % 500 == 0:
-            # Decode
-            source_img = batch[self.control_key].to(self.device)
-            print("SOURCE_IMG_BATCH:", source_img.shape)
+            # Generate 4 multiview predictions from a single source image
             with torch.no_grad():
-                # Get source images (hint/control) from batch
-                source_imgs = batch[self.control_key].to(self.device)
-                if source_imgs.ndim == 4 and source_imgs.shape[-1] == 3:
-                    source_imgs = source_imgs.permute(0, 3, 1, 2)  # HWC -> CHW
-                source_imgs = torch.clamp(source_imgs, 0, 1)
+                import math
                 
-                # Get target images (ground truth)
-                target_imgs = batch[self.first_stage_key].to(self.device)
-                if target_imgs.ndim == 4 and target_imgs.shape[-1] == 3:
-                    target_imgs = target_imgs.permute(0, 3, 1, 2)  # HWC -> CHW
-                target_imgs = torch.clamp(target_imgs, 0, 1)
-
-                # Decode model predictions
-                pred_imgs = self.decode_first_stage(x - model_output)
-                pred_imgs = torch.clamp((pred_imgs + 1) / 2, 0, 1)
-
-                print("PRED_IMG_SHAPE:", pred_imgs.shape)
-
-                # Get pose information
-                delta_pose = cond['delta_pose']  # [B, pose_dim]
-
-                # Wandb
-                # Create comparison images for each sample in batch
+                # Get one source image from batch
+                source_img = batch[self.control_key][:1].to(self.device)  # [1, C, H, W]
+                if source_img.ndim == 4 and source_img.shape[-1] == 3:
+                    source_img = source_img.permute(0, 3, 1, 2)
+                source_img_display = torch.clamp(source_img, 0, 1)
+                
+                # Encode source image to latent
+                source_latent = self.encode_first_stage(source_img * 2 - 1).mode().detach()
+                
+                # Get text conditioning (empty)
+                c_text = self.get_learned_conditioning([""])
+                
+                # Define 4 different yaw angles for multiview (in radians)
+                # e.g., -15°, -5°, +5°, +15°
+                yaw_angles_deg = [-15, -5, 5, 15]
+                
                 wandb_images = []
-                for i in range(min(pred_imgs.shape[0], 4)):  # Limit to 4 samples
-                    # Format pose info for caption
-                    pose_vals = delta_pose[i].cpu().numpy()
-                    pose_str = f"Pose: [{pose_vals[0]:.2f}, {pose_vals[1]:.2f}, {pose_vals[2]:.2f}, ...]" if len(pose_vals) > 3 else f"Pose: {pose_vals}"
+                
+                # Add source image first
+                wandb_images.append(wandb.Image(
+                    source_img_display[0],
+                    caption=f"Step {self.global_step} | SOURCE"
+                ))
+                
+                # Generate prediction for each pose
+                for yaw_deg in yaw_angles_deg:
+                    yaw_rad = math.radians(yaw_deg)
+                    # Create pose: [pitch, yaw, distance]
+                    delta_pose_mv = torch.tensor([[0.0, yaw_rad, 0.0]], device=self.device)
                     
-                    # Log source image
-                    wandb_images.append(wandb.Image(
-                        source_imgs[i], 
-                        caption=f"Step {self.global_step} | Sample {i} | SOURCE"
-                    ))
+                    # Create conditioning dict for this pose
+                    cond_mv = {
+                        'c_crossattn': [c_text],
+                        'c_concat': [source_img],
+                        'in_concat': [source_latent],
+                        'delta_pose': delta_pose_mv
+                    }
                     
-                    # Log target (ground truth)
-                    wandb_images.append(wandb.Image(
-                        target_imgs[i], 
-                        caption=f"Step {self.global_step} | Sample {i} | TARGET | {pose_str}"
-                    ))
+                    # Sample using DDIM for faster inference
+                    from ldm.models.diffusion.ddim import DDIMSampler
+                    sampler = DDIMSampler(self)
                     
-                    # Log prediction
+                    shape = [4, source_img.shape[2] // 8, source_img.shape[3] // 8]
+                    
+                    # Use fewer steps for visualization (faster)
+                    samples, _ = sampler.sample(
+                        S=20,  # Quick sampling
+                        batch_size=1,
+                        shape=shape,
+                        conditioning=cond_mv,
+                        verbose=False,
+                        unconditional_guidance_scale=1.0,
+                        eta=0.0
+                    )
+                    
+                    # Decode to image
+                    pred_img = self.decode_first_stage(samples)
+                    pred_img = torch.clamp((pred_img + 1) / 2, 0, 1)
+                    
                     wandb_images.append(wandb.Image(
-                        pred_imgs[i], 
-                        caption=f"Step {self.global_step} | Sample {i} | PREDICTION | {pose_str}"
+                        pred_img[0],
+                        caption=f"Step {self.global_step} | Yaw: {yaw_deg}°"
                     ))
-
-                # 5. Log to the active run
-                run.log({"visual_predictions": wandb_images})
-
-        # loss, loss_dict = self.shared_step(batch)
-
-        # if mask is not None:
-        #     error = (loss_dict["pred_noise"] - loss_dict["target_noise"]) ** 2
-        #     loss = (error * mask).mean()
+                
+                # Log all multiview predictions
+                run.log({"multiview_predictions": wandb_images})
+                print(f"[VIS] Logged multiview predictions at step {self.global_step}")
 
         self.log("train_loss", loss, prog_bar=True, logger=True)
         return loss
 
     def on_after_backward(self):
-        """Called after loss.backward() - check if LoRA gets gradients"""
-        if self.global_step % 100 == 0:
+        # Print every 50 steps for better visibility
+        if self.global_step % 50 == 0:
+            print(f"\n[GRAD CHECK] Step {self.global_step}")
+            
             lora_grads = []
             pose_net_grads = []
+            
             for n, p in self.model.diffusion_model.named_parameters():
+                if not p.requires_grad:
+                    continue
+                    
                 if "lora" in n.lower():
                     if p.grad is not None:
                         grad_norm = p.grad.norm().item()

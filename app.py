@@ -8,6 +8,7 @@ from cldm.model import load_state_dict
 from ldm.util import instantiate_from_config
 from ldm.models.diffusion.ddim import DDIMSampler
 
+import logging
 import torch
 from torchvision import transforms
 from torch import autocast
@@ -237,6 +238,8 @@ def get_T_from_relative(x, y, z, pose_enc="freq")->torch.Tensor:
         (-90., 0., 0.): top view
         (90., 0., 0.): bottom view
     """
+    print("POSE_ENC:", pose_enc)
+    logging.debug(pose_enc)
     if pose_enc in ["freq","identity"]:
         d_T = torch.tensor([math.radians(x), math.radians(y), z])
     elif pose_enc == "zero":

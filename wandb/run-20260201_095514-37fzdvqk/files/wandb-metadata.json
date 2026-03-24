@@ -1,0 +1,40 @@
+{
+  "os":  "Windows-10-10.0.26200-SP0",
+  "python":  "CPython 3.9.25",
+  "startedAt":  "2026-02-01T00:55:14.270819Z",
+  "program":  "c:\\Users\\user\\Documents\\JY\\TOSS\\toss_debug.ipynb",
+  "codePath":  "c:\\Users\\user\\Documents\\JY\\TOSS\\toss_debug.ipynb",
+  "codePathLocal":  "toss_debug.ipynb",
+  "git":  {
+    "remote":  "https://github.com/wndyd0131/TOSS-Human-Novel-Views",
+    "commit":  "a491eec3b2437b9f7b6be2d93aedcef62bb08210"
+  },
+  "email":  "wndyd0131@naver.com",
+  "root":  "c:\\Users\\user\\Documents\\JY\\TOSS",
+  "host":  "DESKTOP-DOA4090",
+  "executable":  "c:\\Users\\user\\.conda\\envs\\toss\\python.exe",
+  "cpu_count":  20,
+  "cpu_count_logical":  28,
+  "gpu":  "NVIDIA GeForce RTX 4090",
+  "gpu_count":  1,
+  "disk":  {
+    "/":  {
+      "total":  "508854005760",
+      "used":  "464160792576"
+    }
+  },
+  "memory":  {
+    "total":  "34031251456"
+  },
+  "gpu_nvidia":  [
+    {
+      "name":  "NVIDIA GeForce RTX 4090",
+      "memoryTotal":  "25757220864",
+      "cudaCores":  16384,
+      "architecture":  "Ada",
+      "uuid":  "GPU-3432a451-4c72-ce16-cca9-03b0ff7626ff"
+    }
+  ],
+  "cudaVersion":  "13.0",
+  "writerId":  "ygscpxjtq8jvrrnp5iana6uwcap4nnla"
+}

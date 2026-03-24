@@ -170,18 +170,3 @@ class DPTNormalModel(DPT):
         norm = out.norm(dim=1, keepdim=True).clamp(min=1e-8)
         return out / norm
 
-    def forward_features(self, x):
-        """Return intermediate geometry features (path_1) before the normal head. For perceptual loss."""
-        if self.channels_last:
-            x = x.contiguous(memory_format=torch.channels_last)
-        layer_1, layer_2, layer_3, layer_4 = forward_vit(self.pretrained, x)
-        layer_1_rn = self.scratch.layer1_rn(layer_1)
-        layer_2_rn = self.scratch.layer2_rn(layer_2)
-        layer_3_rn = self.scratch.layer3_rn(layer_3)
-        layer_4_rn = self.scratch.layer4_rn(layer_4)
-        path_4 = self.scratch.refinenet4(layer_4_rn)
-        path_3 = self.scratch.refinenet3(path_4, layer_3_rn)
-        path_2 = self.scratch.refinenet2(path_3, layer_2_rn)
-        path_1 = self.scratch.refinenet1(path_2, layer_1_rn)  # [B, 256, H', W']
-        return path_1
-

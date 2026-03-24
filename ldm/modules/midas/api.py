@@ -158,11 +158,16 @@ class DPTNormalInference(nn.Module):
         self.model = load_dpt_normal_model(model_path)
         self.model.train = disabled_train
         self.net_w = self.net_h = 384
-        self.normalization = NormalizeImage(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+        # self.normalization = NormalizeImage(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
 
     def preprocess(self, rgb):
         """rgb: [B,3,H,W] in [0,1]. Returns tensor ready for DPT (384x384, normalized)."""
-        x = self.normalization(rgb)
+        # 1. Manual Normalization (ImageNet stats) 
+        # This replaces the failing self.normalization(rgb) call
+        mean = torch.tensor([0.485, 0.456, 0.406], device=rgb.device).view(1, 3, 1, 1)
+        std = torch.tensor([0.229, 0.224, 0.225], device=rgb.device).view(1, 3, 1, 1)
+        
+        x = (rgb - mean) / std
         x = torch.nn.functional.interpolate(
             x, size=(self.net_h, self.net_w), mode="bilinear", align_corners=False
         )
@@ -179,11 +184,6 @@ class DPTNormalInference(nn.Module):
         norm = out.norm(dim=1, keepdim=True).clamp(min=1e-8)
         out = out / norm
         return out
-
-    def forward_features(self, rgb):
-        """Extract geometry features for perceptual loss. Returns [B, 256, H', W'] at DPT resolution."""
-        x = self.preprocess(rgb)
-        return self.model.forward_features(x)
 
 
 class MiDaSInference(nn.Module):
