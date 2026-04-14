@@ -4,7 +4,6 @@ from peft import get_peft_model, LoraConfig
 import torch.nn.functional as F
 from torch import nn
 import wandb
-import lpips
 import pytz
 from datetime import datetime
 # CRITICAL FIX: Completely disable gradient checkpointing to fix LoRA gradient flow
@@ -91,13 +90,6 @@ class TossLoraModule(TOSS):
 
         self.model.diffusion_model.print_trainable_parameters()
 
-        # Initialize perceptual loss (LPIPS)
-        self.lpips_loss = lpips.LPIPS(net='vgg').eval()
-        self.lpips_loss.requires_grad_(False)
-
-        # Loss weights
-        self.perceptual_weight = 1.0
-        self.mse_weight = 0.1
 
     @property
     def normal_estimator(self):
@@ -122,10 +114,7 @@ class TossLoraModule(TOSS):
                 "learning_rate": self.learning_rate,
                 "image_size": self.image_size,
                 "timesteps": self.num_timesteps,
-                "loss_type": "perceptual + mse",
-                "perceptual_weight": self.perceptual_weight,
-                "mse_weight": self.mse_weight,
-                "lpips_backbone": "vgg",
+                "loss_type": "mse",
             }, allow_val_change=True)
 
     def training_step(self, batch, batch_idx):
@@ -141,42 +130,25 @@ class TossLoraModule(TOSS):
 
         model_output = self.apply_model(x_noisy, t, cond)
 
-        # Predict x0 from noise prediction
-        sqrt_alphas_cumprod = self.sqrt_alphas_cumprod[t][:, None, None, None]
-        sqrt_one_minus_alphas_cumprod = self.sqrt_one_minus_alphas_cumprod[t][:, None, None, None]
-        pred_x0 = (x_noisy - sqrt_one_minus_alphas_cumprod * model_output) / sqrt_alphas_cumprod
-
-        # Decode to image space for perceptual loss
-        pred_img = self.decode_first_stage(pred_x0)
-        gt_img = self.decode_first_stage(x)
-
-        # Perceptual loss (LPIPS)
-        self.lpips_loss = self.lpips_loss.to(pred_img.device)
-        perceptual_loss = self.lpips_loss(pred_img, gt_img).mean()
-
-        # MSE loss on noise prediction
-        mse_loss = F.mse_loss(model_output, noise, reduction="mean")
-
-        loss = self.perceptual_weight * perceptual_loss + self.mse_weight * mse_loss
+        loss = F.mse_loss(model_output, noise, reduction="mean")
 
         loss_log = {
-            "loss": loss,
-            "perceptual_loss": perceptual_loss,
-            "mse_loss": mse_loss,
+            # "loss": loss,
+            "mse_loss": loss,
         }
 
         # Geometry loss
-        geom_loss = torch.tensor(0.0, device=self.device)
-        if self.geometry_loss_weight > 0 and "normal" in batch and "normal_mask" in batch:
-            pred_imgs = torch.clamp((pred_img + 1) / 2, 0, 1)
-            if pred_imgs.ndim == 4 and pred_imgs.shape[-1] == 3:
-                pred_imgs = pred_imgs.permute(0, 3, 1, 2)
-            pred_normals = self.normal_estimator(pred_imgs)
-            gt_normals = batch["normal"].to(self.device)
-            normal_mask = batch["normal_mask"].to(self.device)
-            geom_loss = _cosine_similarity_loss(pred_normals, gt_normals, normal_mask)
-            loss = loss + self.geometry_loss_weight * geom_loss
-            loss_log["geometry_loss"] = geom_loss
+        # geom_loss = torch.tensor(0.0, device=self.device)
+        # if self.geometry_loss_weight > 0 and "normal" in batch and "normal_mask" in batch:
+        #     pred_imgs = torch.clamp((pred_img + 1) / 2, 0, 1)
+        #     if pred_imgs.ndim == 4 and pred_imgs.shape[-1] == 3:
+        #         pred_imgs = pred_imgs.permute(0, 3, 1, 2)
+        #     pred_normals = self.normal_estimator(pred_imgs)
+        #     gt_normals = batch["normal"].to(self.device)
+        #     normal_mask = batch["normal_mask"].to(self.device)
+        #     geom_loss = _cosine_similarity_loss(pred_normals, gt_normals, normal_mask)
+        #     loss = loss + self.geometry_loss_weight * geom_loss
+        #     loss_log["geometry_loss"] = geom_loss
 
         run.log(loss_log)
 
