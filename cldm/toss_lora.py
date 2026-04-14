@@ -180,50 +180,48 @@ class TossLoraModule(TOSS):
 
         run.log(loss_log)
 
-        # WandB image logging
+        # WandB image logging: source | GT | prediction (same pose)
         if batch_idx % 50 == 0:
             with torch.no_grad():
                 import math
+                from ldm.models.diffusion.ddim import DDIMSampler
 
+                # Source image
                 source_img = batch[self.control_key][:1].to(self.device)
                 if source_img.ndim == 4 and source_img.shape[-1] == 3:
                     source_img = source_img.permute(0, 3, 1, 2)
                 source_img_display = torch.clamp(source_img, 0, 1)
 
+                # GT target image (same as used in loss)
+                gt_img_raw = batch[self.first_stage_key][:1].to(self.device)
+                if gt_img_raw.ndim == 4 and gt_img_raw.shape[-1] == 3:
+                    gt_img_raw = gt_img_raw.permute(0, 3, 1, 2)
+                gt_display = torch.clamp((gt_img_raw + 1) / 2, 0, 1)
+
+                # Generate prediction for the same pose as GT
                 source_latent = self.encode_first_stage(source_img * 2 - 1).mode().detach()
                 c_text = self.get_learned_conditioning([""])
+                cond_vis = {
+                    'c_crossattn': [c_text],
+                    'c_concat': [source_img],
+                    'in_concat': [source_latent],
+                    'delta_pose': batch["delta_pose"][:1],
+                }
+                sampler = DDIMSampler(self)
+                shape = [4, source_img.shape[2] // 8, source_img.shape[3] // 8]
+                samples, _ = sampler.sample(
+                    S=20, batch_size=1, shape=shape,
+                    conditioning=cond_vis, verbose=False,
+                    unconditional_guidance_scale=1.0, eta=0.0
+                )
+                pred_display = torch.clamp((self.decode_first_stage(samples) + 1) / 2, 0, 1)
 
-                yaw_angles_deg = [-15, -5, 5, 15]
-                wandb_images = [wandb.Image(source_img_display[0], caption=f"Step {self.global_step} | SOURCE")]
-
-                for yaw_deg in yaw_angles_deg:
-                    yaw_rad = math.radians(yaw_deg)
-                    delta_pose_mv = torch.tensor([[0.0, yaw_rad, 0.0]], device=self.device)
-                    cond_mv = {
-                        'c_crossattn': [c_text],
-                        'c_concat': [source_img],
-                        'in_concat': [source_latent],
-                        'delta_pose': delta_pose_mv
-                    }
-
-                    from ldm.models.diffusion.ddim import DDIMSampler
-                    sampler = DDIMSampler(self)
-                    shape = [4, source_img.shape[2] // 8, source_img.shape[3] // 8]
-                    samples, _ = sampler.sample(
-                        S=20,
-                        batch_size=1,
-                        shape=shape,
-                        conditioning=cond_mv,
-                        verbose=False,
-                        unconditional_guidance_scale=1.0,
-                        eta=0.0
-                    )
-
-                    pred_img_vis = self.decode_first_stage(samples)
-                    pred_img_vis = torch.clamp((pred_img_vis + 1) / 2, 0, 1)
-                    wandb_images.append(wandb.Image(pred_img_vis[0], caption=f"Step {self.global_step} | Yaw: {yaw_deg}°"))
-
-                run.log({"multiview_predictions": wandb_images})
+                yaw_deg = math.degrees(batch["delta_pose"][0, 1].item())
+                run.log({
+                    "vis/source": wandb.Image(source_img_display[0], caption="Source"),
+                    "vis/gt":     wandb.Image(gt_display[0],          caption=f"GT (yaw={yaw_deg:.1f}°)"),
+                    "vis/pred":   wandb.Image(pred_display[0],         caption=f"Pred (yaw={yaw_deg:.1f}°)"),
+                })
 
         self.log("train_loss", loss, prog_bar=True, logger=True)
         return loss
