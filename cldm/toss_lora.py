@@ -2,7 +2,6 @@ import torch
 from cldm.toss import TOSS
 from peft import get_peft_model, LoraConfig
 import torch.nn.functional as F
-from torch import nn
 import wandb
 import pytz
 from datetime import datetime
@@ -80,11 +79,6 @@ class TossLoraModule(TOSS):
         for n, p in self.model.diffusion_model.named_parameters():
             if "lora" in n.lower():
                 p.requires_grad = True
-                if "lora_B" in n:
-                    with torch.no_grad():
-                        nn.init.kaiming_uniform_(p, a=5**0.5)
-                        p.mul_(0.01)
-
             if "base_model.model.out." in n:
                 p.requires_grad = True
 
