@@ -76,7 +76,7 @@ class TossLoraModule(TOSS):
                 p.requires_grad = True
             if "vae_proj" in n:
                 p.requires_grad = True
-                
+
         # 4. Explicitly enable gradients for LoRA parameters
         for n, p in self.model.diffusion_model.named_parameters():
             if "lora" in n.lower():
@@ -196,7 +196,7 @@ class TossLoraModule(TOSS):
 
     def configure_optimizers(self):
         lora_params = []
-        pose_net_params = []
+        finetune_params = []
         other_params = []
 
         for n, p in self.model.diffusion_model.named_parameters():
@@ -204,14 +204,18 @@ class TossLoraModule(TOSS):
                 if "lora" in n.lower():
                     lora_params.append(p)
                 elif "pose_net" in n:
-                    pose_net_params.append(p)
+                    finetune_params.append(p)
+                elif "vae_proj" in n:
+                    finetune_params.append(p)
+                elif "base_model.model.out." in n:
+                    finetune_params.append(p)
                 else:
                     other_params.append(p)
 
         param_groups = [{"params": lora_params, "lr": self.learning_rate, "name": "lora"}]
 
-        if len(pose_net_params) > 0:
-            param_groups.append({"params": pose_net_params, "lr": self.learning_rate * 0.1, "name": "pose_net"})
+        if len(finetune_params) > 0:
+            param_groups.append({"params": finetune_params, "lr": self.learning_rate * 0.1, "name": "finetune"})
 
         if len(other_params) > 0:
             param_groups.append({"params": other_params, "lr": self.learning_rate, "name": "other"})
