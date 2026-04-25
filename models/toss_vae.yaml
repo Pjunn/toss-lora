@@ -7,6 +7,33 @@ model:
         lora_alpha: 16
 
         target_modules: [
+            # Input blocks 1-2 (32x32, highest resolution)
+            "input_blocks.1.1.transformer_blocks.0.attn1.to_q",
+            "input_blocks.1.1.transformer_blocks.0.attn1.to_k",
+            "input_blocks.1.1.transformer_blocks.0.attn1.to_v",
+            "input_blocks.1.1.transformer_blocks.0.attn1.to_out.0",
+            "input_blocks.2.1.transformer_blocks.0.attn1.to_q",
+            "input_blocks.2.1.transformer_blocks.0.attn1.to_k",
+            "input_blocks.2.1.transformer_blocks.0.attn1.to_v",
+            "input_blocks.2.1.transformer_blocks.0.attn1.to_out.0",
+            # Input blocks 4-5 (16x16)
+            "input_blocks.4.1.transformer_blocks.0.attn1.to_q",
+            "input_blocks.4.1.transformer_blocks.0.attn1.to_k",
+            "input_blocks.4.1.transformer_blocks.0.attn1.to_v",
+            "input_blocks.4.1.transformer_blocks.0.attn1.to_out.0",
+            "input_blocks.5.1.transformer_blocks.0.attn1.to_q",
+            "input_blocks.5.1.transformer_blocks.0.attn1.to_k",
+            "input_blocks.5.1.transformer_blocks.0.attn1.to_v",
+            "input_blocks.5.1.transformer_blocks.0.attn1.to_out.0",
+            # Input blocks 7-8 (8x8)
+            "input_blocks.7.1.transformer_blocks.0.attn1.to_q",
+            "input_blocks.7.1.transformer_blocks.0.attn1.to_k",
+            "input_blocks.7.1.transformer_blocks.0.attn1.to_v",
+            "input_blocks.7.1.transformer_blocks.0.attn1.to_out.0",
+            "input_blocks.8.1.transformer_blocks.0.attn1.to_q",
+            "input_blocks.8.1.transformer_blocks.0.attn1.to_k",
+            "input_blocks.8.1.transformer_blocks.0.attn1.to_v",
+            "input_blocks.8.1.transformer_blocks.0.attn1.to_out.0",
             # Middle block (8x8, bottleneck)
             "middle_block.1.transformer_blocks.0.attn1.to_q",
             "middle_block.1.transformer_blocks.0.attn1.to_k",
