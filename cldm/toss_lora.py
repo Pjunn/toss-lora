@@ -156,7 +156,7 @@ class TossLoraModule(TOSS):
         run.log(loss_log)
 
         # WandB image logging: source | GT | prediction (same pose)
-        if batch_idx % 50 == 0:
+        if self.global_step % 50 == 0:
             with torch.no_grad():
                 import math
                 from ldm.models.diffusion.ddim import DDIMSampler
@@ -193,9 +193,11 @@ class TossLoraModule(TOSS):
 
                 yaw_deg = math.degrees(batch["delta_pose"][0, 1].item())
                 run.log({
-                    "vis/source": wandb.Image(source_img_display[0], caption="Source"),
-                    "vis/gt":     wandb.Image(gt_display[0],          caption=f"GT (yaw={yaw_deg:.1f}°)"),
-                    "vis/pred":   wandb.Image(pred_display[0],         caption=f"Pred (yaw={yaw_deg:.1f}°)"),
+                    "vis/triplet": [
+                        wandb.Image(source_img_display[0], caption="Source"),
+                        wandb.Image(gt_display[0],         caption=f"GT (yaw={yaw_deg:.1f}°)"),
+                        wandb.Image(pred_display[0],       caption=f"Pred (yaw={yaw_deg:.1f}°)"),
+                    ],
                 })
 
         self.log("train_loss", loss, prog_bar=True, logger=True)
