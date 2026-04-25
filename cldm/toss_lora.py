@@ -133,6 +133,13 @@ class TossLoraModule(TOSS):
             "mse_loss": loss,
         }
 
+        opt = self.optimizers()
+        if not isinstance(opt, list):
+            opt = [opt]
+        for o in opt:
+            for pg in o.param_groups:
+                loss_log[f"lr/{pg.get('name', 'group')}"] = pg["lr"]
+
         # Geometry loss
         # geom_loss = torch.tensor(0.0, device=self.device)
         # if self.geometry_loss_weight > 0 and "normal" in batch and "normal_mask" in batch:
