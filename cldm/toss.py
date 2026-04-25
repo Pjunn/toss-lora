@@ -53,9 +53,6 @@ class TOSS(LatentDiffusion):
 
         c = batch.get(self.cond_stage_key, None)
 
-        print("get_input raw control:", batch[self.control_key].shape)
-        # self.print("get_input raw control:", batch[self.control_key].shape)
-
         # camera pose
         delta_pose = batch['delta_pose']
         delta_pose = delta_pose.to(self.device)
