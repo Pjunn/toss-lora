@@ -74,7 +74,9 @@ class TossLoraModule(TOSS):
         for n, p in self.model.diffusion_model.named_parameters():
             if "pose_net" in n:
                 p.requires_grad = True
-
+            if "vae_proj" in n:
+                p.requires_grad = True
+                
         # 4. Explicitly enable gradients for LoRA parameters
         for n, p in self.model.diffusion_model.named_parameters():
             if "lora" in n.lower():
